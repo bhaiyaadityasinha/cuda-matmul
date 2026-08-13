@@ -20,12 +20,19 @@ CUDA-based matrix multiplication implemented from scratch.
 - Verified correctness
 - Benchmarked on NVIDIA T4
 
+### Progress 5
+- Implemented naive CUDA matmul in CUDA C++
+- Implemented shared-memory tiled CUDA matmul
+- Verified correctness
+- Benchmarked both kernels on NVIDIA T4
+
 ### Benchmark
 | Implementation | N | Time |
 |---|---:|---:|
 | Naive CPU | 1024 | 4602.65 ms |
 | Cache-friendly CPU | 1024 | 493.722 ms |
 | Naive CUDA | 1024 | 5.408 ms |
+| Tiled CUDA | 1024 | 3.552 ms |
 
 ## Next
 - Implement tiled CUDA matrix multiplication using shared memory
