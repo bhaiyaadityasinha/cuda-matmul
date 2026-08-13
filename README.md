@@ -15,12 +15,17 @@ CUDA-based matrix multiplication implemented from scratch.
 - Implemented naive and cache-friendly CPU matrix multiplication in C++
 - Compared loop orders and cache locality
 
+### Progress 4
+- Implemented naive CUDA matmul in CUDA C++
+- Verified correctness
+- Benchmarked on NVIDIA T4
+
 ### Benchmark
 | Implementation | N | Time |
 |---|---:|---:|
 | Naive CPU | 1024 | 4602.65 ms |
 | Cache-friendly CPU | 1024 | 493.722 ms |
-| Naive CUDA | 1024 | 21.391 ms |
+| Naive CUDA | 1024 | 5.408 ms |
 
 ## Next
 - Implement tiled CUDA matrix multiplication using shared memory
