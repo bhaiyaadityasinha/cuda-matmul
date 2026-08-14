@@ -97,28 +97,34 @@ int main()
     cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
 
     // Verify correctness
+    const int NUM_CHECKS = 1000;
     bool correct = true;
-
-    for (int i = 0; i < 10; i++)
-    {
-        int row = i;
-        int col = i;
-
+    int first_bad_row = -1, first_bad_col = -1;
+    float first_bad_got = 0.0f, first_bad_expected = 0.0f;
+    for (int i = 0; i < NUM_CHECKS; i++) {
+        int row = rand() % N;
+        int col = rand() % N;
         float expected = 0.0f;
-
         for (int k = 0; k < N; k++)
             expected += A[row * N + k] * B[k * N + col];
-
-        if (fabsf(C[row * N + col] - expected) > 1e-3f)
-        {
+        float got = C[row * N + col];
+        if (fabsf(got - expected) > 1e-3f) {
             correct = false;
+            first_bad_row = row;
+            first_bad_col = col;
+            first_bad_got = got;
+            first_bad_expected = expected;
             break;
-        }
+         }
+    }
+    printf("Correct: %s (%d random samples checked)\n", correct ? "True" : "False", NUM_CHECKS);
+    if (!correct) {
+        printf("  First mismatch at C[%d][%d]: got %.6f, expected %.6f\n",
+           first_bad_row, first_bad_col, first_bad_got, first_bad_expected);
     }
 
     double gflops = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
 
-    printf("Correct: %s\n", correct ? "True" : "False");
     printf("Tiled CUDA: %.3f ms\n", ms);
     printf("Performance: %.2f GFLOPS\n", gflops);
     printf("T4 Peak efficiency: %.2f%%\n", gflops / 8100.0 * 100);
