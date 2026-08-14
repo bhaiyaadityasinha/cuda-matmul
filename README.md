@@ -1,38 +1,28 @@
-# cuda-matmul
-CUDA-based matrix multiplication implemented from scratch.
+# CUDA Matrix Multiplication
 
-## Development Log
-### Progress 1
-* Implemented a vector addition kernel
+CUDA-based matrix multiplication implemented from scratch — a tiled shared-memory kernel achieves a **~1300x speedup** over a naive CPU implementation (N=1024, NVIDIA T4).
 
-### Progress 2
-* Implemented a naive CUDA matrix multiplication kernel
-* Each thread computes a single output element
-* Verified correctness against NumPy reference implementation
-* Benchmarked on an NVIDIA T4 GPU
 
-### Progress 3
-- Implemented naive and cache-friendly CPU matrix multiplication in C++
-- Compared loop orders and cache locality
+## Benchmark
 
-### Progress 4
-- Implemented naive CUDA matmul in CUDA C++
-- Verified correctness
-- Benchmarked on NVIDIA T4
+| Implementation | N | Time | Speedup vs naive CPU |
+|---|---|---|---|
+| Naive CPU | 1024 | 4602.65 ms | 1x |
+| Cache-friendly CPU | 1024 | 493.722 ms | 9.3x |
+| Naive CUDA | 1024 | 5.408 ms | 851x |
+| Tiled CUDA (shared memory) | 1024 | 3.552 ms | 1296x |
 
-### Progress 5
-- Implemented naive CUDA matmul in CUDA C++
-- Implemented shared-memory tiled CUDA matmul
-- Verified correctness
-- Benchmarked both kernels on NVIDIA T4
+The tiled kernel reduces global memory traffic by loading tiles of A and B into on-chip shared memory once per block and reusing them across all threads in that block, instead of each thread re-reading from global memory independently.
 
-### Benchmark
-| Implementation | N | Time |
-|---|---:|---:|
-| Naive CPU | 1024 | 4602.65 ms |
-| Cache-friendly CPU | 1024 | 493.722 ms |
-| Naive CUDA | 1024 | 5.408 ms |
-| Tiled CUDA | 1024 | 3.552 ms |
 
-## Next
-- Implement tiled CUDA matrix multiplication using shared memory
+## Structure
+
+cpu/ — naive and cache-friendly matrix multiplication in C++
+cuda/ — naive and shared-memory tiled matrix multiplication in CUDA C++
+
+
+## Milestones
+
+- Naive and cache-friendly CPU matmul (C++)
+- Naive CUDA matmul, verified against NumPy, benchmarked on T4
+- Shared-memory tiled CUDA matmul, benchmarked on T4
