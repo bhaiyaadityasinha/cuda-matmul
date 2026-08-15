@@ -47,9 +47,11 @@ int main() {
     dim3 threads(16, 16);
     dim3 blocks((N + 15) / 16, (N + 15) / 16);
 
+    //Warm-up
     matmul_naive<<<blocks, threads>>>(d_A, d_B, d_C, N);
     cudaDeviceSynchronize();
 
+    //Benchmark
     cudaEvent_t start, end;
     cudaEventCreate(&start);
     cudaEventCreate(&end);
@@ -66,6 +68,7 @@ int main() {
     cudaEventElapsedTime(&ms, start, end);
     ms /= 10;
 
+    // Copy result back
     cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
 
     const int NUM_CHECKS = 1000;
@@ -107,6 +110,9 @@ int main() {
     free(A);
     free(B);
     free(C);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(end);
 
     return 0;
 }
