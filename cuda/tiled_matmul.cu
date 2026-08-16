@@ -5,9 +5,11 @@
 #include <math.h>
 
 #define TILE_SIZE 16
+#define TILE_SIZE_2D 64
 #define N 1024
-#define TM 8
-#define TN 8
+#define TM_1d 8
+#define TM 4
+#define TN 4
 
 
 //Kernel 1: Shared memory caching
@@ -55,13 +57,13 @@ __global__ void matmul_tiled(float* A, float* B, float* C, int n)
 //=================================================================
 __global__ void matmul_1d_tiled(float* A, float* B, float* C, int n)
 {
-    __shared__ float tileA[TILE_SIZE * TM][TILE_SIZE];
+    __shared__ float tileA[TILE_SIZE * TM_1d][TILE_SIZE];
     __shared__ float tileB[TILE_SIZE][TILE_SIZE];
 
-    int blockRowStart = blockIdx.y * (TILE_SIZE * TM);
-    int col           = blockIdx.x * TILE_SIZE + threadIdx.x;
+    int blockRowStart = blockIdx.y * (TILE_SIZE * TM_1d);
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
 
-    float tmp[TM] = {0.0f};
+    float tmp[TM_1d] = {0.0f};
 
     int numTiles = (n + TILE_SIZE - 1) / TILE_SIZE;
 
@@ -71,7 +73,7 @@ __global__ void matmul_1d_tiled(float* A, float* B, float* C, int n)
         tileB[threadIdx.y][threadIdx.x] =
             (bRow < n && col < n) ? B[bRow * n + col] : 0.0f;
 
-        for (int i = 0; i < TM; i++)
+        for (int i = 0; i < TM_1d; i++)
         {
             int aRow = blockRowStart + i * TILE_SIZE + threadIdx.y;
             int aCol = t * TILE_SIZE + threadIdx.x;
@@ -82,19 +84,92 @@ __global__ void matmul_1d_tiled(float* A, float* B, float* C, int n)
         __syncthreads();
 
         for (int k = 0; k < TILE_SIZE; k++)
-            for (int i = 0; i < TM; i++)
+            for (int i = 0; i < TM_1d; i++)
                 tmp[i] += tileA[i * TILE_SIZE + threadIdx.y][k]
                          * tileB[k][threadIdx.x];
 
         __syncthreads();
     }
 
-    for (int i = 0; i < TM; i++)
+    for (int i = 0; i < TM_1d; i++)
     {
         int row = blockRowStart + i * TILE_SIZE + threadIdx.y;
         if (row < n && col < n)
             C[row * n + col] = tmp[i];
     }
+}
+
+
+//Kerenel 3: 2D Tiling
+//===============================================================
+__global__ void matmul_2d_tiled(float* A, float* B, float* C, int n){
+  __shared__ float tileA[TILE_SIZE_2D][TILE_SIZE_2D];
+  __shared__ float tileB[TILE_SIZE_2D][TILE_SIZE_2D];
+
+  int blockRowStart = blockIdx.y * TILE_SIZE_2D;
+  int blockColStart = blockIdx.x * TILE_SIZE_2D;
+
+  //flat thread id, used only for cooperative tile loading
+  int threadsPerBlock = blockDim.x * blockDim.y;
+  int threadFlat = threadIdx.y * blockDim.x + threadIdx.x;
+
+  //This thread's output: a 4x4 block, kept entirely in registers
+  float results[TM][TN] = {{0.0f}};
+
+  float colOfA[TM]; //TM values pulled from tileA's column
+  float rowOfB[TN]; //TN values pulled from tileB's row'
+
+  int numTiles = (n + TILE_SIZE_2D - 1) / TILE_SIZE_2D;
+
+  for(int t = 0; t < numTiles; t ++){
+    int elemsPerTile = TILE_SIZE_2D * TILE_SIZE_2D;
+    for(int idx = threadFlat; idx < elemsPerTile; idx += threadsPerBlock){
+      int r = idx / TILE_SIZE_2D;
+      int c = idx % TILE_SIZE_2D;
+
+      int aRow = blockRowStart + r;
+      int aCol = t* TILE_SIZE_2D + c;
+      tileA[r][c] = (aRow < n && aCol < n) ? A[aRow * n + aCol] : 0.0f;
+
+      int bRow = t * TILE_SIZE_2D + r;
+      int bCol = blockColStart + c;
+      tileB[r][c] = (bRow < n && bCol < n) ? B[bRow * n + bCol] : 0.0f;
+    }
+    __syncthreads();
+
+  for(int k = 0; k < TILE_SIZE_2D; k++){
+    //pull this thread's column slice of tileA into registers
+    for(int i = 0; i < TM; i++){
+      colOfA[i] = tileA[threadIdx.y * TM + i][k];
+    }
+
+    //pull this thread's row slice of tileB into registers
+    for(int j = 0; j < TN; j++){
+      rowOfB[j] = tileB[k][threadIdx.x * TN + j];
+    }
+
+    //outer product: 4x4 = 16 FMAs, purely register to register
+    for(int i = 0; i < TM; i++){
+      for(int j = 0; j < TN; j++){
+        results[i][j] += colOfA[i] * rowOfB[j];
+      }
+    }
+  }
+
+  __syncthreads();
+  }
+
+  //Write this thread's 8x8 output back to c
+  for(int i =0; i < TM; i++){
+    for(int j = 0; j < TN; j++){
+      int row = blockRowStart + threadIdx.y * TM + i;
+      int col = blockColStart + threadIdx.x * TN + j;
+      if(row < n && col < n){
+        C[row * n + col] = results[i][j];
+      }
+    }
+  }
+
 }
 
 
@@ -174,8 +249,10 @@ int main()
     cudaEventElapsedTime(&ms, start, end);
     ms /= 10;
 
+    // Copy result back
     cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
 
+    // Verify correctness
     printf("\n=== Basic Tiled ===\n");
     verify(A, B, C, N, "basic");
     double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
@@ -187,7 +264,7 @@ int main()
     {
     dim3 threads(TILE_SIZE, TILE_SIZE);
     dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE,
-                    (N + TILE_SIZE * TM - 1) / (TILE_SIZE * TM));
+                    (N + TILE_SIZE * TM_1d - 1) / (TILE_SIZE * TM_1d));
 
     matmul_1d_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N); // warm-up
     cudaDeviceSynchronize();
@@ -201,11 +278,40 @@ int main()
     ms /= runs;
 
     cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
-    printf("\n=== 1D Tiled (TM=%d) ===\n", TM);
+    printf("\n=== 1D Tiled (TM=%d) ===\n", TM_1d);
     verify(A, B, C, N, "1d-tiled");
     double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
     printf("  Time: %.3f ms | %.2f GFLOPS | %.2f%% peak\n", ms, gf, gf / peak * 100);
     }
+
+
+    // -- Kernel 3: 2D Tiled --------------------------------
+    {
+        dim3 threads(TILE_SIZE_2D / TN, TILE_SIZE_2D / TM);
+        dim3 blocks((N + TILE_SIZE_2D - 1) / TILE_SIZE_2D,
+                       (N + TILE_SIZE_2D - 1) / TILE_SIZE_2D);
+
+        matmul_2d_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N);
+        cudaDeviceSynchronize();
+
+        cudaEventRecord(start);
+        for (int i = 0; i < runs; i++)
+            matmul_2d_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N);
+        cudaEventRecord(end);
+        cudaEventSynchronize(end);
+        cudaEventElapsedTime(&ms, start, end);
+        ms /= runs;
+
+        cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
+        printf("\n=== Kernel 3: 2D Tiled (TM=%d, TN=%d, TILE=%d) ===\n",
+               TM, TN, TILE_SIZE_2D);
+        verify(A, B, C, N, "2d-tiled");
+        double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
+        printf("  Time: %.3f ms | %.2f GFLOPS | %.2f%% peak\n", ms, gf, gf / peak * 100);
+    }
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(end);
 
     cudaFree(d_A);
     cudaFree(d_B);
@@ -214,9 +320,6 @@ int main()
     free(A);
     free(B);
     free(C);
-
-    cudaEventDestroy(start);
-    cudaEventDestroy(end);
 
     return 0;
 }
