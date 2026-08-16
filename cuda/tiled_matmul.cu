@@ -6,7 +6,12 @@
 
 #define TILE_SIZE 16
 #define N 1024
+#define TM 8
+#define TN 8
 
+
+//Kernel 1: Shared memory caching
+//===============================================================
 __global__ void matmul_tiled(float* A, float* B, float* C, int n)
 {
     __shared__ float tileA[TILE_SIZE][TILE_SIZE];
@@ -45,8 +50,82 @@ __global__ void matmul_tiled(float* A, float* B, float* C, int n)
         C[row * n + col] = tmp;
 }
 
+
+// Kernel 2: 1D Tiling
+//=================================================================
+__global__ void matmul_1d_tiled(float* A, float* B, float* C, int n)
+{
+    __shared__ float tileA[TILE_SIZE * TM][TILE_SIZE];
+    __shared__ float tileB[TILE_SIZE][TILE_SIZE];
+
+    int blockRowStart = blockIdx.y * (TILE_SIZE * TM);
+    int col           = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    float tmp[TM] = {0.0f};
+
+    int numTiles = (n + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (int t = 0; t < numTiles; t++)
+    {
+        int bRow = t * TILE_SIZE + threadIdx.y;
+        tileB[threadIdx.y][threadIdx.x] =
+            (bRow < n && col < n) ? B[bRow * n + col] : 0.0f;
+
+        for (int i = 0; i < TM; i++)
+        {
+            int aRow = blockRowStart + i * TILE_SIZE + threadIdx.y;
+            int aCol = t * TILE_SIZE + threadIdx.x;
+            tileA[i * TILE_SIZE + threadIdx.y][threadIdx.x] =
+                (aRow < n && aCol < n) ? A[aRow * n + aCol] : 0.0f;
+        }
+
+        __syncthreads();
+
+        for (int k = 0; k < TILE_SIZE; k++)
+            for (int i = 0; i < TM; i++)
+                tmp[i] += tileA[i * TILE_SIZE + threadIdx.y][k]
+                         * tileB[k][threadIdx.x];
+
+        __syncthreads();
+    }
+
+    for (int i = 0; i < TM; i++)
+    {
+        int row = blockRowStart + i * TILE_SIZE + threadIdx.y;
+        if (row < n && col < n)
+            C[row * n + col] = tmp[i];
+    }
+}
+
+
+// Verify
+// ===============================================================
+static void verify(const float* A, const float* B, const float* C,
+                   int n, const char* label)
+{
+    const int CHECKS = 1000;
+    bool correct = true;
+    for (int i = 0; i < CHECKS && correct; i++)
+    {
+        int row = rand() % n, col = rand() % n;
+        float expected = 0.0f;
+        for (int k = 0; k < n; k++)
+            expected += A[row * n + k] * B[k * n + col];
+        if (fabsf(C[row * n + col] - expected) > 1e-3f)
+        {
+            printf("  [%s] MISMATCH at C[%d][%d]: got %.6f expected %.6f\n",
+                   label, row, col, C[row * n + col], expected);
+            correct = false;
+        }
+    }
+    printf("  [%s] Correct: %s (%d samples)\n",
+           label, correct ? "True" : "False", CHECKS);
+}
+
+
 int main()
 {
+    srand(42);
     int size = N * N * sizeof(float);
 
     float* A = (float*)malloc(size);
@@ -60,74 +139,73 @@ int main()
     }
 
     float *d_A, *d_B, *d_C;
-
     cudaMalloc(&d_A, size);
     cudaMalloc(&d_B, size);
     cudaMalloc(&d_C, size);
-
     cudaMemcpy(d_A, A, size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, B, size, cudaMemcpyHostToDevice);
 
-    dim3 threads(TILE_SIZE, TILE_SIZE);
-    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE,
-                (N + TILE_SIZE - 1) / TILE_SIZE);
+    double peak = 8100.0;
+    int runs = 10;
+    float ms = 0.0f;
 
-    // Warm-up
-    matmul_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N);
-    cudaDeviceSynchronize();
-
-    // Benchmark
     cudaEvent_t start, end;
     cudaEventCreate(&start);
     cudaEventCreate(&end);
 
+
+    //--Kernel 1: Basic Tiled-------------------------------
+    {
+    dim3 threads(TILE_SIZE, TILE_SIZE);
+    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE,
+                (N + TILE_SIZE - 1) / TILE_SIZE);
+
+    matmul_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N);  // Warm-up
+    cudaDeviceSynchronize();
+
     cudaEventRecord(start);
 
-    for (int i = 0; i < 10; i++)
+    for (int i = 0; i < runs; i++)
         matmul_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N);
 
     cudaEventRecord(end);
     cudaEventSynchronize(end);
 
-    float ms = 0;
     cudaEventElapsedTime(&ms, start, end);
     ms /= 10;
 
-    // Copy result back
     cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
 
-    // Verify correctness
-    const int NUM_CHECKS = 1000;
-    bool correct = true;
-    int first_bad_row = -1, first_bad_col = -1;
-    float first_bad_got = 0.0f, first_bad_expected = 0.0f;
-    for (int i = 0; i < NUM_CHECKS; i++) {
-        int row = rand() % N;
-        int col = rand() % N;
-        float expected = 0.0f;
-        for (int k = 0; k < N; k++)
-            expected += A[row * N + k] * B[k * N + col];
-        float got = C[row * N + col];
-        if (fabsf(got - expected) > 1e-3f) {
-            correct = false;
-            first_bad_row = row;
-            first_bad_col = col;
-            first_bad_got = got;
-            first_bad_expected = expected;
-            break;
-         }
-    }
-    printf("Correct: %s (%d random samples checked)\n", correct ? "True" : "False", NUM_CHECKS);
-    if (!correct) {
-        printf("  First mismatch at C[%d][%d]: got %.6f, expected %.6f\n",
-           first_bad_row, first_bad_col, first_bad_got, first_bad_expected);
+    printf("\n=== Basic Tiled ===\n");
+    verify(A, B, C, N, "basic");
+    double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
+    printf("  Time: %.3f ms | %.2f GFLOPS | %.2f%% peak\n", ms, gf, gf / peak * 100);
     }
 
-    double gflops = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
 
-    printf("Tiled CUDA: %.3f ms\n", ms);
-    printf("Performance: %.2f GFLOPS\n", gflops);
-    printf("T4 Peak efficiency: %.2f%%\n", gflops / 8100.0 * 100);
+    // -- Kernel 2: 1D Tiled -------------------------------------
+    {
+    dim3 threads(TILE_SIZE, TILE_SIZE);
+    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE,
+                    (N + TILE_SIZE * TM - 1) / (TILE_SIZE * TM));
+
+    matmul_1d_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N); // warm-up
+    cudaDeviceSynchronize();
+
+    cudaEventRecord(start);
+    for (int i = 0; i < runs; i++)
+    matmul_1d_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N);
+    cudaEventRecord(end);
+    cudaEventSynchronize(end);
+    cudaEventElapsedTime(&ms, start, end);
+    ms /= runs;
+
+    cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
+    printf("\n=== 1D Tiled (TM=%d) ===\n", TM);
+    verify(A, B, C, N, "1d-tiled");
+    double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
+    printf("  Time: %.3f ms | %.2f GFLOPS | %.2f%% peak\n", ms, gf, gf / peak * 100);
+    }
 
     cudaFree(d_A);
     cudaFree(d_B);
