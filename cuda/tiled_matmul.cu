@@ -1,5 +1,3 @@
-%%writefile cuda/tiled_matmul.cu
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -173,6 +171,107 @@ __global__ void matmul_2d_tiled(float* A, float* B, float* C, int n){
 }
 
 
+
+// Kernel 4: Vectorised Loads (float4)
+// ============================================================
+__global__ void matmul_vec4(float* A, float* B, float* C, int n)
+{
+    __shared__ float tileA[TILE_SIZE_2D][TILE_SIZE_2D];
+    __shared__ float tileB[TILE_SIZE_2D][TILE_SIZE_2D];
+
+    int blockRowStart = blockIdx.y * TILE_SIZE_2D;
+    int blockColStart = blockIdx.x * TILE_SIZE_2D;
+
+    int threadsPerBlock = blockDim.x * blockDim.y;
+    int threadFlat = threadIdx.y * blockDim.x + threadIdx.x;
+
+    float tmp[TM][TN] = {{0.0f}};
+    float regA[TM];
+    float regB[TN];
+
+    int numTiles  = (n + TILE_SIZE_2D - 1) / TILE_SIZE_2D;
+    int vec4PerTile = (TILE_SIZE_2D * TILE_SIZE_2D) / 4;
+
+    for (int t = 0; t < numTiles; t++)
+    {
+        float4* tileA_vec = reinterpret_cast<float4*>(tileA);
+        float4* A_vec = reinterpret_cast<float4*>(A);
+
+        for (int idx = threadFlat; idx < vec4PerTile; idx += threadsPerBlock)
+        {
+            int flatFloat = idx * 4;
+            int r = flatFloat / TILE_SIZE_2D;
+            int c = flatFloat % TILE_SIZE_2D;
+
+            int aRow = blockRowStart + r;
+            int aCol = t * TILE_SIZE_2D + c;
+
+            if (aRow < n && aCol + 3 < n)
+                tileA_vec[idx] = A_vec[aRow * (n / 4) + aCol / 4];
+            else
+            {
+                tileA[r][c + 0] = (aRow < n && aCol + 0 < n) ? A[aRow * n + aCol + 0] : 0.0f;
+                tileA[r][c + 1] = (aRow < n && aCol + 1 < n) ? A[aRow * n + aCol + 1] : 0.0f;
+                tileA[r][c + 2] = (aRow < n && aCol + 2 < n) ? A[aRow * n + aCol + 2] : 0.0f;
+                tileA[r][c + 3] = (aRow < n && aCol + 3 < n) ? A[aRow * n + aCol + 3] : 0.0f;
+            }
+        }
+
+        float4* tileB_vec = reinterpret_cast<float4*>(tileB);
+        float4* B_vec     = reinterpret_cast<float4*>(B);
+
+        for (int idx = threadFlat; idx < vec4PerTile; idx += threadsPerBlock)
+        {
+            int flatFloat = idx * 4;
+            int r = flatFloat / TILE_SIZE_2D;
+            int c = flatFloat % TILE_SIZE_2D;
+
+            int bRow = t * TILE_SIZE_2D + r;
+            int bCol = blockColStart + c;
+
+            if (bRow < n && bCol + 3 < n)
+                tileB_vec[idx] = B_vec[bRow * (n / 4) + bCol / 4];
+            else
+            {
+                tileB[r][c + 0] = (bRow < n && bCol + 0 < n) ? B[bRow * n + bCol + 0] : 0.0f;
+                tileB[r][c + 1] = (bRow < n && bCol + 1 < n) ? B[bRow * n + bCol + 1] : 0.0f;
+                tileB[r][c + 2] = (bRow < n && bCol + 2 < n) ? B[bRow * n + bCol + 2] : 0.0f;
+                tileB[r][c + 3] = (bRow < n && bCol + 3 < n) ? B[bRow * n + bCol + 3] : 0.0f;
+            }
+        }
+
+        __syncthreads();
+
+        for (int k = 0; k < TILE_SIZE_2D; k++)
+        {
+            for (int i = 0; i < TM; i++)
+                regA[i] = tileA[threadIdx.y * TM + i][k];
+            float4 b4 = reinterpret_cast<const float4*>(&tileB[k][threadIdx.x * TN])[0];
+            regB[0] = b4.x;
+            regB[1] = b4.y;
+            regB[2] = b4.z;
+            regB[3] = b4.w;
+
+            for (int i = 0; i < TM; i++)
+                for (int j = 0; j < TN; j++)
+                    tmp[i][j] += regA[i] * regB[j];
+        }
+
+        __syncthreads();
+    }
+
+    for (int i = 0; i < TM; i++)
+        for (int j = 0; j < TN; j++)
+        {
+            int row = blockRowStart + threadIdx.y * TM + i;
+            int col = blockColStart + threadIdx.x * TN + j;
+            if (row < n && col < n)
+                C[row * n + col] = tmp[i][j];
+        }
+}
+
+
+
 // Verify
 // ===============================================================
 static void verify(const float* A, const float* B, const float* C,
@@ -220,8 +319,8 @@ int main()
     cudaMemcpy(d_A, A, size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, B, size, cudaMemcpyHostToDevice);
 
-    double peak = 8100.0;
-    int runs = 10;
+    double peak = 2.0 * 2048 * 2.100;  // 8601.6 GFLOPS, RTX 3050 Laptop
+    int runs = 100;
     float ms = 0.0f;
 
     cudaEvent_t start, end;
@@ -247,7 +346,7 @@ int main()
     cudaEventSynchronize(end);
 
     cudaEventElapsedTime(&ms, start, end);
-    ms /= 10;
+    ms /= runs;
 
     // Copy result back
     cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
@@ -309,6 +408,32 @@ int main()
         double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
         printf("  Time: %.3f ms | %.2f GFLOPS | %.2f%% peak\n", ms, gf, gf / peak * 100);
     }
+
+
+    // -- Kernel 4: Vectorised Loads (float4) ----------------------
+    {
+        dim3 k4_threads(TILE_SIZE_2D / TN, TILE_SIZE_2D / TM);
+        dim3 k4_blocks((N + TILE_SIZE_2D - 1) / TILE_SIZE_2D,
+                       (N + TILE_SIZE_2D - 1) / TILE_SIZE_2D);
+
+        matmul_vec4<<<k4_blocks, k4_threads>>>(d_A, d_B, d_C, N);
+        cudaDeviceSynchronize();
+
+        cudaEventRecord(start);
+        for (int i = 0; i < runs; i++)
+            matmul_vec4<<<k4_blocks, k4_threads>>>(d_A, d_B, d_C, N);
+        cudaEventRecord(end);
+        cudaEventSynchronize(end);
+        cudaEventElapsedTime(&ms, start, end);
+        ms /= runs;
+
+        cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
+        printf("\n=== Kernel 4: Vectorised Loads (float4) ===\n");
+        verify(A, B, C, N, "vec4");
+        double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
+        printf("  Time: %.3f ms | %.2f GFLOPS | %.2f%% peak\n", ms, gf, gf / peak * 100);
+    }
+
 
     cudaEventDestroy(start);
     cudaEventDestroy(end);
