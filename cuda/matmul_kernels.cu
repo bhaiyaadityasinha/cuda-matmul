@@ -9,6 +9,8 @@
 #define TM 4
 #define TN 4
 
+//Kernel 0: Naive
+//=============================================================
 __global__ void matmul_naive(float* A, float* B, float* C, int n)
 {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -27,9 +29,9 @@ __global__ void matmul_naive(float* A, float* B, float* C, int n)
 
 
 
-//Kernel 1: Shared memory caching
+//Kernel 1: Shared Memory Tiling
 //===============================================================
-__global__ void matmul_tiled(float* A, float* B, float* C, int n)
+__global__ void matmul_smem(float* A, float* B, float* C, int n)
 {
     __shared__ float tileA[TILE_SIZE][TILE_SIZE];
     __shared__ float tileB[TILE_SIZE][TILE_SIZE];
@@ -115,7 +117,7 @@ __global__ void matmul_1d_tiled(float* A, float* B, float* C, int n)
 }
 
 
-//Kerenel 3: 2D Tiling
+//Kernel 3: 2D Tiling
 //===============================================================
 __global__ void matmul_2d_tiled(float* A, float* B, float* C, int n){
   __shared__ float tileA[TILE_SIZE_2D][TILE_SIZE_2D];
@@ -386,19 +388,19 @@ int main()
 
 
 
-    //--Kernel 1: Basic Tiled-------------------------------
+    //--Kernel 1: Shared Memory Tiling-------------------------------
     {
     dim3 threads(TILE_SIZE, TILE_SIZE);
     dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE,
                 (N + TILE_SIZE - 1) / TILE_SIZE);
 
-    matmul_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N);  // Warm-up
+    matmul_smem<<<blocks, threads>>>(d_A, d_B, d_C, N);  // Warm-up
     cudaDeviceSynchronize();
 
     cudaEventRecord(start);
 
     for (int i = 0; i < runs; i++)
-        matmul_tiled<<<blocks, threads>>>(d_A, d_B, d_C, N);
+        matmul_smem<<<blocks, threads>>>(d_A, d_B, d_C, N);
 
     cudaEventRecord(end);
     cudaEventSynchronize(end);
@@ -410,8 +412,8 @@ int main()
     cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
 
     // Verify correctness
-    printf("\n=== Basic Tiled ===\n");
-    verify(A, B, C, N, "basic");
+    printf("\n=== Shared Memory Tiling ===\n");
+    verify(A, B, C, N, "smem");
     double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
     printf("  Time: %.3f ms | %.2f GFLOPS | %.2f%% peak\n", ms, gf, gf / peak * 100);
     }
