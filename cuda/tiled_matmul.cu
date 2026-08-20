@@ -9,6 +9,23 @@
 #define TM 4
 #define TN 4
 
+__global__ void matmul_naive(float* A, float* B, float* C, int n)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < n && col < n)
+    {
+        float tmp = 0.0f;
+
+        for (int k = 0; k < n; ++k)
+            tmp += A[row * n + k] * B[k * n + col];
+
+        C[row * n + col] = tmp;
+    }
+}
+
+
 
 //Kernel 1: Shared memory caching
 //===============================================================
@@ -174,7 +191,11 @@ __global__ void matmul_2d_tiled(float* A, float* B, float* C, int n){
 
 // Kernel 4: Vectorised Loads (float4)
 // ============================================================
-__global__ void matmul_vec4(float* A, float* B, float* C, int n)
+__global__ void matmul_vec4(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int n)
 {
     __shared__ float tileA[TILE_SIZE_2D][TILE_SIZE_2D];
     __shared__ float tileB[TILE_SIZE_2D][TILE_SIZE_2D];
@@ -195,7 +216,7 @@ __global__ void matmul_vec4(float* A, float* B, float* C, int n)
     for (int t = 0; t < numTiles; t++)
     {
         float4* tileA_vec = reinterpret_cast<float4*>(tileA);
-        float4* A_vec = reinterpret_cast<float4*>(A);
+        const float4* A_vec = reinterpret_cast<const float4*>(A);
 
         for (int idx = threadFlat; idx < vec4PerTile; idx += threadsPerBlock)
         {
@@ -218,7 +239,7 @@ __global__ void matmul_vec4(float* A, float* B, float* C, int n)
         }
 
         float4* tileB_vec = reinterpret_cast<float4*>(tileB);
-        float4* B_vec     = reinterpret_cast<float4*>(B);
+        const float4* B_vec = reinterpret_cast<const float4*>(B);
 
         for (int idx = threadFlat; idx < vec4PerTile; idx += threadsPerBlock)
         {
@@ -260,14 +281,23 @@ __global__ void matmul_vec4(float* A, float* B, float* C, int n)
         __syncthreads();
     }
 
-    for (int i = 0; i < TM; i++)
-        for (int j = 0; j < TN; j++)
-        {
-            int row = blockRowStart + threadIdx.y * TM + i;
-            int col = blockColStart + threadIdx.x * TN + j;
-            if (row < n && col < n)
-                C[row * n + col] = tmp[i][j];
-        }
+    for (int i = 0; i < TM; ++i)
+{
+    const int row = blockRowStart + threadIdx.y * TM + i;
+    const int col = blockColStart + threadIdx.x * TN;
+
+    if (row < n && col + 3 < n)
+    {
+        reinterpret_cast<float4*>(&C[row * n + col])[0] =
+            make_float4(tmp[i][0], tmp[i][1], tmp[i][2], tmp[i][3]);
+    }
+    else
+    {
+        for (int j = 0; j < TN; ++j)
+            if (row < n && col + j < n)
+                C[row * n + col + j] = tmp[i][j];
+    }
+}
 }
 
 
@@ -326,6 +356,34 @@ int main()
     cudaEvent_t start, end;
     cudaEventCreate(&start);
     cudaEventCreate(&end);
+
+    // -- Kernel 0: Naive ------------------------------------------
+    {
+    dim3 threads(16, 16);
+    dim3 blocks((N + 15) / 16, (N + 15) / 16);
+
+    matmul_naive<<<blocks, threads>>>(d_A, d_B, d_C, N);  // Warm-up
+    cudaDeviceSynchronize();
+
+    cudaEventRecord(start);
+    for (int i = 0; i < runs; ++i)
+        matmul_naive<<<blocks, threads>>>(d_A, d_B, d_C, N);
+    cudaEventRecord(end);
+    cudaEventSynchronize(end);
+
+    cudaEventElapsedTime(&ms, start, end);
+    ms /= runs;
+
+    cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost);
+
+    printf("\n=== Kernel 0: Naive ===\n");
+    verify(A, B, C, N, "naive");
+
+    double gf = (2.0 * N * N * N) / (ms * 1e-3) / 1e9;
+    printf("  Time: %.3f ms | %.2f GFLOPS | %.2f%% peak\n",
+           ms, gf, gf / peak * 100);
+    }
+
 
 
     //--Kernel 1: Basic Tiled-------------------------------
