@@ -1,12 +1,11 @@
-%%writefile cpu/cpu_matmul.cpp
-
 #include <iostream>
 #include <vector>
 #include <chrono>
+#include <cstdlib>
 
 using namespace std;
 
-void matmul_naive(const vector<float>& A,
+void matmul_naive_cpu(const vector<float>& A,
                   const vector<float>& B,
                   vector<float>& C,
                   int N)
@@ -17,7 +16,7 @@ void matmul_naive(const vector<float>& A,
                 C[i * N + j] += A[i * N + k] * B[k * N + j];
 }
 
-void matmul_cache_friendly(const vector<float>& A,
+void matmul_cache_friendly_cpu(const vector<float>& A,
                            const vector<float>& B,
                            vector<float>& C,
                            int N)
@@ -30,31 +29,76 @@ void matmul_cache_friendly(const vector<float>& A,
 
 int main()
 {
-    int N = 1024;
+    constexpr int N = 1024;
+    constexpr int runs = 5;
 
-    vector<float> A(N * N, 1.0f);
-    vector<float> B(N * N, 1.0f);
+    // Same random initialization pattern as CUDA benchmarks
+    srand(42);
+
+    vector<float> A(N * N);
+    vector<float> B(N * N);
     vector<float> C(N * N, 0.0f);
 
-    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < N * N; i++) {
+        A[i] = (float)rand() / RAND_MAX;
+        B[i] = (float)rand() / RAND_MAX;
+    }
 
-    matmul_naive(A, B, C, N);
-
-    auto end = chrono::high_resolution_clock::now();
-
-    cout << "Naive CPU: "
-         << chrono::duration<double, milli>(end - start).count()
-         << " ms\n";
-
+    // -- Naive ---------------------------------
+    matmul_naive_cpu(A, B, C, N);
     fill(C.begin(), C.end(), 0.0f);
 
-    start = chrono::high_resolution_clock::now();
+    double total_ms = 0.0;
 
-    matmul_cache_friendly(A, B, C, N);
+    for (int r = 0; r < runs; r++) {
+        fill(C.begin(), C.end(), 0.0f);
 
-    end = chrono::high_resolution_clock::now();
+        auto start = chrono::high_resolution_clock::now();
 
-    cout << "Cache-friendly CPU: "
-         << chrono::duration<double, milli>(end - start).count()
-         << " ms\n";
+        matmul_naive_cpu(A, B, C, N);
+
+        auto end = chrono::high_resolution_clock::now();
+
+        total_ms += chrono::duration<double, milli>(end - start).count();
+    }
+
+    double naive_ms = total_ms / runs;
+    double naive_gflops =
+        (2.0 * N * N * N) / (naive_ms * 1e-3) / 1e9;
+
+    cout << "  Naive CPU:          "
+         << naive_ms << " ms | "
+         << naive_gflops << " GFLOPS\n";
+
+
+    // -- Cache-friendly ------------------------------------
+    matmul_cache_friendly_cpu(A, B, C, N);
+    fill(C.begin(), C.end(), 0.0f);
+
+    total_ms = 0.0;
+
+    for (int r = 0; r < runs; r++) {
+        fill(C.begin(), C.end(), 0.0f);
+
+        auto start = chrono::high_resolution_clock::now();
+
+        matmul_cache_friendly_cpu(A, B, C, N);
+
+        auto end = chrono::high_resolution_clock::now();
+
+        total_ms += chrono::duration<double, milli>(end - start).count();
+    }
+
+    double cache_ms = total_ms / runs;
+    double cache_gflops =
+        (2.0 * N * N * N) / (cache_ms * 1e-3) / 1e9;
+
+    cout<< "  Cache-friendly CPU: "
+        <<cache_ms<< " ms | "
+        <<cache_gflops<< " GFLOPS\n";
+
+    cout<< "  Cache speedup vs naive: "
+        << naive_ms / cache_ms<< "x\n";
+
+    return 0;
 }
